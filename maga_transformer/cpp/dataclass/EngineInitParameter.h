@@ -98,6 +98,12 @@ public:
     std::unique_ptr<ft::Weights>
     createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
                      std::unique_ptr<ConstBufferPtrMap>  global_weight);
+    void
+    createGptGlobalWeightsWithPack(py::object global_weight,
+                            fastertransformer::Weights &gpt_weights);
+    void
+    createGptLayerWeightsWithPack(py::object layers_weight, ssize_t i,
+                            fastertransformer::Weights &gpt_weights);
 
 
     // TODO(): rm old impl init
@@ -107,6 +113,15 @@ public:
 
 private:
 
+    void createGptGlobalWeights(std::unique_ptr<ConstBufferPtrMap>  global_weight,
+                                ft::Weights &gpt_weights);
+    void createGptLayerWeights(ConstBufferPtrMap layer_weights,
+                                ft::Weights &gpt_weights);
+    void createGptGlobalWeightsWithPack(std::unique_ptr<ConstBufferPtrMap>  global_weight,
+                            py::object *py_global_weight, ft::Weights &gpt_weights);
+    void createGptLayerWeightsWithPack(std::unique_ptr<ConstBufferPtrMap> layer_weights,
+                           py::object *py_layer_weights, ft::Weights &gpt_weights, ssize_t i);
+    std::unique_ptr<TensorMap>  convertLayerWeightsSingle(py::object py_layer_weights, ssize_t i);
     std::unique_ptr<TensorMaps> convertLayerWeights(py::object py_layer_weights);
     std::unique_ptr<TensorMap>  convertGlobalWeight(py::object py_global_weight);
 

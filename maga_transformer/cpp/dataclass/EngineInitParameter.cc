@@ -5,6 +5,9 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/models/W.h"
 #include <memory>
+#if defined(__aarch64__)
+#include "src/fastertransformer/devices/arm_impl/gemm_opt/ArmGemmKernel.h"
+#endif
 using namespace std;
 using namespace fastertransformer;
 
@@ -83,6 +86,14 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
     if (map.count(scales_key) == 0) {
         dense_weights->kernel = mayFindBuffer(map, kernel_key);
     } else {
+#if defined(__aarch64__)
+        // input: qweight int8, scale fp16
+        // output: packed weight
+        auto kernel = mayFindBuffer(map, kernel_key);
+        auto scales = mayFindBuffer(map, scales_key);
+
+        dense_weights->kernel = prepareGemmOptForGPTQInt4(kernel, scales, kernel_key);
+#else
         auto kernel = mayFindBuffer(map, kernel_key);
         auto shape = kernel->shape();
         auto dtype = kernel->type();
@@ -99,9 +110,9 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                 new ft::QBuffer(BufferPtr(new Buffer(kernel->where(), dtype, shape, kernel->data())),
                             std::move(scalesBuffer),
                             std::move(zerosBuffer)));
+#endif
         FT_LOG_DEBUG("quant_method:%d, kernel_key:%s have scale use Qbuffer, kernel:%s",
                         quant_algo_.getQuantMethod(), kernel_key.c_str(), kernel->debugString().c_str());
-
     }
 
 
@@ -197,6 +208,22 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     return attention_weights;
 }
 
+std::unique_ptr<TensorMap>
+WeightsConverter::convertLayerWeightsSingle(py::object py_layer_weights, ssize_t i) {
+    TensorMap weights;
+
+    if (!py::isinstance<py::list>(py_layer_weights)) {
+        throw std::runtime_error("Expected a list, but get " + py::cast<std::string>(py::str(py_layer_weights)));
+    }
+    py::list py_list = py::reinterpret_borrow<py::list>(py_layer_weights);
+
+    for (auto& it : convertPyObjectToDict(py_list[i])) {
+        weights.emplace(it.first, convertPyObjectToTensor(it.second));
+    }
+
+    return std::make_unique<TensorMap>(std::move(weights));
+}
+
 std::unique_ptr<TensorMaps>
 WeightsConverter::convertLayerWeights(py::object py_layer_weights) {
     TensorMaps tensor_layer_weights;
@@ -259,12 +286,9 @@ WeightsConverter::createGptWeights(std::unique_ptr<TensorMaps> layer_weights,
                                       std::move(convertGlobalWeight(std::move(global_weight)))));
 }
 
-std::unique_ptr<ft::Weights>
-WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
-                                   std::unique_ptr<ConstBufferPtrMap>  global_weight)
+void WeightsConverter::createGptGlobalWeights(std::unique_ptr<ConstBufferPtrMap>  global_weight,
+                                            ft::Weights &gpt_weights)
 {
-    auto        layers_weights = *layer_weights;
-    ft::Weights gpt_weights;
     // make global weight
     gpt_weights.embedding = mayCreateDenseWeights(*global_weight,
                                                    W::embedding);
@@ -287,36 +311,106 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
 
     gpt_weights.linear_bias_slopes = mayCreateDenseWeights(*global_weight, W::linear_bias_slopes);
 
+    return;
+}
+
+void WeightsConverter::createGptLayerWeights(ConstBufferPtrMap layer_weights,
+                                            ft::Weights &gpt_weights)
+{
+    ft::LayerWeights layer_ws;
+    layer_ws.pre_attention_smoother_weight = mayCreateDenseWeights(layer_weights, W::attn_i_smoother);
+    layer_ws.pre_layernorm = mayCreateLayerNormWeights(layer_weights,
+                                                            W::pre_ln_gamma,
+                                                            W::pre_ln_beta,
+                                                            W::pre_ln_s,
+                                                            W::pre_ln_sr);
+
+    layer_ws.post_ffn_layernorm = mayCreateLayerNormWeights(layer_weights,
+                                                                W::post_ffn_ln_gamma,
+                                                                W::post_ffn_ln_beta,
+                                                                W::post_ffn_ln_s,
+                                                                W::post_ffn_ln_sr);
+
+    layer_ws.post_layernorm = mayCreateLayerNormWeights(layer_weights,
+                                                            W::post_ln_gamma,
+                                                            W::post_ln_beta,
+                                                            W::post_ln_s,
+                                                            W::post_ln_sr);
+
+    layer_ws.self_attention_weights = createAttentionWeights(layer_weights);
+
+    layer_ws.ffn_weights = createFfnWeights(layer_weights);
+
+    gpt_weights.layers.emplace_back(std::move(layer_ws));
+    return;
+}
+
+std::unique_ptr<ft::Weights>
+WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
+                                   std::unique_ptr<ConstBufferPtrMap>  global_weight)
+{
+    auto        layers_weights = *layer_weights;
+    ft::Weights gpt_weights;
+
+    // make global weight
+    createGptGlobalWeights(std::move(global_weight), gpt_weights);
+
     for (auto& layer_weights : layers_weights) {
-        ft::LayerWeights layer_ws;
-        layer_ws.pre_attention_smoother_weight = mayCreateDenseWeights(layer_weights, W::attn_i_smoother);
-        layer_ws.pre_layernorm = mayCreateLayerNormWeights(layer_weights,
-                                                               W::pre_ln_gamma,
-                                                               W::pre_ln_beta,
-                                                               W::pre_ln_s,
-                                                               W::pre_ln_sr);
-
-        layer_ws.post_ffn_layernorm = mayCreateLayerNormWeights(layer_weights,
-                                                                    W::post_ffn_ln_gamma,
-                                                                    W::post_ffn_ln_beta,
-                                                                    W::post_ffn_ln_s,
-                                                                    W::post_ffn_ln_sr);
-
-        layer_ws.post_layernorm = mayCreateLayerNormWeights(layer_weights,
-                                                                W::post_ln_gamma,
-                                                                W::post_ln_beta,
-                                                                W::post_ln_s,
-                                                                W::post_ln_sr);
-
-        layer_ws.self_attention_weights = createAttentionWeights(layer_weights);
-        layer_ws.ffn_weights = createFfnWeights(layer_weights);
-        gpt_weights.layers.emplace_back(std::move(layer_ws));
+        createGptLayerWeights(layer_weights, gpt_weights);
     }
+
     return std::make_unique<ft::Weights>(gpt_weights);
 }
 
+#if defined(__aarch64__)
+void WeightsConverter::createGptGlobalWeightsWithPack(std::unique_ptr<ConstBufferPtrMap>  global_weight,
+                            py::object *py_global_weight, ft::Weights &gpt_weights)
+{
+    createGptGlobalWeights(std::move(global_weight), gpt_weights);
 
+    /* Remove lm_head tensor. */
+    py_global_weight->attr("pop")(W::lm_head);
 
+    return;
+}
+
+void WeightsConverter::createGptLayerWeightsWithPack(std::unique_ptr<ConstBufferPtrMap> layer_weights,
+                           py::object *py_layer_weights, ft::Weights &gpt_weights, ssize_t i)
+{
+    py::module gc = py::module::import("gc");
+    // gc.attr("set_debug")(gc.attr("DEBUG_STATS"));
+
+    py::list py_layer_weights_list = py_layer_weights->cast<py::list>();
+
+    createGptLayerWeights(*layer_weights, gpt_weights);
+    /* Release Attention weights tensors. */
+    py_layer_weights_list[i].attr("pop")(W::attn_qkv_w);
+    py_layer_weights_list[i].attr("pop")(W::attn_o_w);
+
+    /* Release FFN weights tensors. */
+    py_layer_weights_list[i].attr("pop")(W::ffn_w1);
+    py_layer_weights_list[i].attr("pop")(W::ffn_w2);
+    py_layer_weights_list[i].attr("pop")(W::ffn_w3);
+
+    gc.attr("collect")();
+    // usleep(3000000);
+
+    return;
+}
+
+void
+WeightsConverter::createGptGlobalWeightsWithPack(py::object global_weight, fastertransformer::Weights &gpt_weights)
+{
+    return createGptGlobalWeightsWithPack(std::move(convertGlobalWeight(std::move(convertGlobalWeight(global_weight)))), &global_weight, gpt_weights);
+}
+
+void
+WeightsConverter::createGptLayerWeightsWithPack(py::object layers_weight, ssize_t i, fastertransformer::Weights &gpt_weights)
+{
+    /* The second convert, from TensorMap to BufferPtrMap, utilizes convertGlobalWeight which does the type conversion.  */
+    return createGptLayerWeightsWithPack(std::move(convertGlobalWeight(std::move(convertLayerWeightsSingle(layers_weight, i)))), &layers_weight, gpt_weights, i);
+}
+#endif
 
 /////////////////////////////////deprected///////////////////////////
 
@@ -338,7 +432,18 @@ std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInit
     py::object                  py_global_weights = model.attr("weight").attr("global_weights");
 
     auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
+#if defined(__aarch64__)
+    /* Convert weights by layers so weights that are packed can be released promptly and save memory. */
+    ft::Weights gpt_weights;
+    convert.createGptGlobalWeightsWithPack(py_global_weights, gpt_weights);
+    auto layers = py_layers_weights.cast<py::list>().size();
+    for (auto i = 0; i < layers; i++) {
+        convert.createGptLayerWeightsWithPack(py_layers_weights, i, gpt_weights);
+    }
+    auto gpt_weight = std::make_unique<ft::Weights>(gpt_weights);
+#else
     auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+#endif
 
     return {gpt_init_params, std::move(gpt_weight)};
 }
