@@ -289,13 +289,15 @@ void context_mask(BufferPtr input, const Buffer& mask) {
     const int dim1 = input->shape()[1];
     const int dim2 = input->shape()[2];
     const int dim3 = input->shape()[3];
+    const int mask_m = mask.shape()[1];
+    const int mask_n = mask.shape()[2];
 
     const int N = dim0 * dim1;
     parallel_for(N, [&](int tid) {
         int b = tid / dim1;
         for (int i = 0; i < dim2 * dim3; i++) {
             auto v = input->dataWithOffset(tid * dim2 * dim3 + i);
-            auto m = mask.dataWithOffset(b * dim2 * dim3 + i);
+            auto m = mask.dataWithOffset((b * mask_m  + i / dim3) * mask_n + (i % dim3));
             *(T*)v += (1.0f - *(T_mask*)m) * -10000.0f;
         }
     });
@@ -311,6 +313,11 @@ void processSoftmaxMask(const SoftmaxParams& params) {
     auto num_heads = input->shape()[1];
     auto q_length = input->shape()[2];
     auto k_length = input->shape()[3];
+    auto mask_m = params.mask.value().get().shape()[1];
+    auto mask_n = params.mask.value().get().shape()[2];
+    /* Input has 4 dims and mask has 3 dims. The lowest 2 dims of both have identical value.
+     * Mask dim[2] is identical to or bigger than Input dim[3].
+     */
 
     float* score = reinterpret_cast<float*>(input->data());
     MaskType* mask = reinterpret_cast<MaskType*>(params.mask.value().get().data());
@@ -321,7 +328,7 @@ void processSoftmaxMask(const SoftmaxParams& params) {
 
         parallel_for(q_length, [&](int j) {
             size_t score_offset = m * q_length * num_heads * k_length + n * q_length * k_length + j * k_length;
-            size_t mask_offset = (m * k_length + j) * k_length;
+            size_t mask_offset = (m * mask_m + j) * mask_n;
 
             vSoftmaxMask<MaskType>(k_length, score + score_offset, mask + mask_offset, params.scale);
         });
