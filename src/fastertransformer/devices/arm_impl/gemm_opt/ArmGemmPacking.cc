@@ -410,6 +410,9 @@ ConstBufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose, bool
 torch::Tensor ArmCpuDevice::preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight) {
     auto buffer = torchTensor2Buffer(weight);
     auto retBuffer = prepareGemmWeight(key, buffer);
+
+    // Repacked buffer size may not match with shape size * element size,
+    // should use buffer pointer instead of copying data.
     if ((key == W::attn_qkv_w ||
         key == W::attn_o_w ||
         key == W::ffn_w1 ||
@@ -418,6 +421,15 @@ torch::Tensor ArmCpuDevice::preprocessGemmWeightByKey(const std::string& key, to
         key == W::lm_head) && retBuffer->type() == DataType::TYPE_BF16) {
         return Buffer2torchTensor(*retBuffer, false);
     }
+
+    if ((key == W::attn_qkv_w ||
+        key == W::attn_o_w ||
+        key == W::ffn_w1 ||
+        key == W::ffn_w2 ||
+        key == W::ffn_w3) && retBuffer->type() == DataType::TYPE_UINT8) {
+        return Buffer2torchTensor(*retBuffer, false);
+    }
+
     return Buffer2torchTensor(*retBuffer);
 }
 
@@ -538,7 +550,7 @@ ConstBufferPtr prepareGemmOptForGPTQInt4(ConstBufferPtr kernel, ConstBufferPtr s
 
         std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
 
-        weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n});
+        weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n / 2});
         BufferPtr output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
                                                         DataType::TYPE_UINT8,
                                                         weight_workspace_shape,
