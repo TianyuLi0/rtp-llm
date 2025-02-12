@@ -68,21 +68,20 @@ BufferPtr ArmCpuDevice::activation(const ActivationParams& params) {
 
         printBufferData(params.bias.value().get(), "ffn activation gate");
         if (states->type() == DataType::TYPE_FP16) {
-            for (size_t i = 0; i < m; i++) {
-                for (size_t j = 0; j < n; j++) {
-                    *(__fp16*)(states->dataWithOffset(i * n + j)) += ((__fp16*)bias)[i * n + j];
-                }
+            #pragma omp parallel for
+            for (size_t i = 0; i < states->size(); i++) {
+                *(__fp16*)(states->dataWithOffset(i)) += ((__fp16*)bias)[i];
             }
         } else if (states->type() == DataType::TYPE_FP32) {
             if (params.bias.value().get().type() == DataType::TYPE_FP32) {
-                for (size_t i = 0; i < m; i++) {
-                    for (size_t j = 0; j < n; j++) {
-                        *(float*)(states->dataWithOffset(i * n + j)) += ((float*)bias)[i * n + j];
-                    }
+                #pragma omp parallel for
+                for (size_t i = 0; i < states->size(); i++) {
+                    *(float*)(states->dataWithOffset(i)) += ((float*)bias)[i];
                 }
             } else if (params.bias.value().get().type() == DataType::TYPE_FP16) {
                 float* bias_converted   = new float[n];
                 act_convert_fp16_to_float((__fp16*)bias,bias_converted,n);
+                #pragma omp parallel for collapse(2)
                 for (size_t i = 0; i < m; i++) {
                     for (size_t j = 0; j < n; j++) {
                         *(float*)(states->dataWithOffset(i * n + j)) += ((float*)bias_converted)[j];
@@ -127,16 +126,14 @@ BufferPtr ArmCpuDevice::activation(const ActivationParams& params) {
         gate = params.gate.value().get().data();
         printBufferData(params.gate.value().get(), "ffn activation gate");
         if (states->type() == DataType::TYPE_FP16) {
-            for (size_t i = 0; i < m; i++) {
-                for (size_t j = 0; j < n; j++) {
-                    *(__fp16*)(states->dataWithOffset(i * n + j)) *= ((__fp16*)gate)[i * n + j];
-                }
+            #pragma omp parallel for if (m > 1)
+            for (size_t i = 0; i < states->size(); i++) {
+                *(__fp16*)(states->dataWithOffset(i)) *= ((__fp16*)gate)[i];
             }
         } else if (states->type() == DataType::TYPE_FP32) {
-            for (size_t i = 0; i < m; i++) {
-                for (size_t j = 0; j < n; j++) {
-                    *(float*)(states->dataWithOffset(i * n + j)) *= ((float*)gate)[i * n + j];
-                }
+            #pragma omp parallel for if (m > 1)
+            for (size_t i = 0; i < states->size(); i++) {
+                *(float*)(states->dataWithOffset(i)) *= ((float*)gate)[i];
             }
         } else {
             throw std::runtime_error("FFN gate data type not supported");
